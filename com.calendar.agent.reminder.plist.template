@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" 
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.calendar.agent.reminder</string>
+  
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/ABSOLUTE/PATH/TO/calendar-agent/daily-reminder.js</string>
+  </array>
+  
+  <key>RunAtLoad</key>
+  <true/>
+  
+  <key>KeepAlive</key>
+  <true/>
+  
+  <key>StandardOutPath</key>
+  <string>/tmp/calendar-agent.log</string>
+  
+  <key>StandardErrorPath</key>
+  <string>/tmp/calendar-agent.error.log</string>
+  
+  <key>WorkingDirectory</key>
+  <string>/ABSOLUTE/PATH/TO/calendar-agent</string>
+</dict>
+</plist>
