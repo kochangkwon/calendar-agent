@@ -11,22 +11,21 @@ import { execSync } from 'child_process';
 const server = new Server(
   {
     name: 'calendar-agent',
-    version: '1.0.1',
+    version: '1.0.0',
   },
   {
     capabilities: {
       tools: {},
     },
-  },
+  }
 );
 
 /**
- * 캘린더 이벤트 조회 함수 (개선된 버전 - 스택 오버플로우 방지)
+ * 캘린더 이벤트 조회 함수 (macOS AppleScript 사용)
  * @param {number} daysOffset - 0: 오늘, 1: 내일, -1: 어제
  * @returns {Array} 이벤트 배열
  */
 function getEvents(daysOffset = 1) {
-  // 더 단순하고 안전한 AppleScript 사용
   const script = `
     set targetDate to (current date) + (${daysOffset} * days)
     set beginning of targetDate to targetDate
@@ -34,98 +33,66 @@ function getEvents(daysOffset = 1) {
     set minutes of beginning of targetDate to 0
     set seconds of beginning of targetDate to 0
     
-    set endOfDay to targetDate
-    set hours of endOfDay to 23
-    set minutes of endOfDay to 59
-    set seconds of endOfDay to 59
-    
-    set output to ""
+    set end of targetDate to targetDate
+    set hours of end of targetDate to 23
+    set minutes of end of targetDate to 59
+    set seconds of end of targetDate to 59
     
     tell application "Calendar"
+      set eventList to {}
       repeat with cal in calendars
-        try
-          set calEvents to (every event of cal whose start date ≥ beginning of targetDate and start date ≤ endOfDay)
-          repeat with evt in calEvents
-            set eventTitle to summary of evt
-            set eventStart to start date of evt as string
-            set eventLocation to ""
-            try
-              set eventLocation to location of evt
-            end try
-            set calName to name of cal
-            
-            set output to output & "EVENTSTART" & return
-            set output to output & "TITLE:" & eventTitle & return
-            set output to output & "START:" & eventStart & return
-            set output to output & "LOCATION:" & eventLocation & return
-            set output to output & "CALENDAR:" & calName & return
-            set output to output & "EVENTEND" & return
-          end repeat
-        on error errMsg
-          -- 개별 캘린더 오류는 무시하고 계속 진행
-        end try
+        set calEvents to (every event of cal whose start date ≥ beginning of targetDate and start date ≤ end of targetDate)
+        repeat with evt in calEvents
+          set eventInfo to {|title|:(summary of evt), |startDate|:(start date of evt as string), |endDate|:(end date of evt as string), |location|:(location of evt), |calendar|:(name of cal)}
+          set end of eventList to eventInfo
+        end repeat
       end repeat
+      return eventList
     end tell
-    
-    return output
   `;
-
+  
   try {
     const result = execSync(`osascript -e '${script.replace(/'/g, "'\\''")}'`, {
       encoding: 'utf-8',
-      timeout: 15000,
+      timeout: 10000
     });
-    return parseSimpleFormat(result);
+    return parseAppleScriptResult(result);
   } catch (error) {
-    console.error('AppleScript execution error:', error.message);
     return { error: error.message };
   }
 }
 
 /**
- * 단순 텍스트 형식 파싱 (스택 안전)
+ * AppleScript 결과를 JSON 형태로 파싱
  * @param {string} result - AppleScript 실행 결과
  * @returns {Array} 파싱된 이벤트 배열
  */
-function parseSimpleFormat(result) {
-  if (!result || result.trim() === '') {
+function parseAppleScriptResult(result) {
+  if (!result || result.trim() === '' || result.trim() === '{}') {
     return [];
   }
-
-  const events = [];
-  const eventBlocks = result.split('EVENTSTART');
-
-  for (const block of eventBlocks) {
-    if (!block.includes('EVENTEND')) continue;
-
-    const lines = block.split('\n');
-    const event = {
-      title: '',
-      startDate: '',
-      location: '',
-      calendar: '',
-    };
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('TITLE:')) {
-        event.title = trimmed.substring(6).trim();
-      } else if (trimmed.startsWith('START:')) {
-        event.startDate = trimmed.substring(6).trim();
-      } else if (trimmed.startsWith('LOCATION:')) {
-        event.location = trimmed.substring(9).trim() || '미정';
-      } else if (trimmed.startsWith('CALENDAR:')) {
-        event.calendar = trimmed.substring(9).trim();
-      }
+  
+  try {
+    // AppleScript는 record를 "title:xxx, startDate:yyy" 형식으로 반환
+    const events = [];
+    const recordPattern = /title:([^,]+),\s*startDate:([^,]+),\s*endDate:([^,]+),\s*location:([^,]*),\s*calendar:([^,}]+)/g;
+    
+    let match;
+    while ((match = recordPattern.exec(result)) !== null) {
+      events.push({
+        title: match[1].trim(),
+        startDate: match[2].trim(),
+        endDate: match[3].trim(),
+        location: match[4].trim() || '미정',
+        calendar: match[5].trim()
+      });
     }
-
-    // 제목이 있는 이벤트만 추가
-    if (event.title) {
-      events.push(event);
-    }
+    
+    return events;
+  } catch (error) {
+    console.error('Parsing error:', error);
+    return [];
   }
-
-  return events;
 }
 
 /**
@@ -136,32 +103,28 @@ function parseSimpleFormat(result) {
  */
 function formatEvents(events, dateLabel = '내일') {
   if (events.error) {
-    return `❌ 일정 조회 중 오류 발생: ${events.error}\n\n권한 확인이 필요할 수 있습니다.\n시스템 설정 > 개인정보 보호 > 캘린더에서 Terminal 또는 Node 접근 권한을 확인해주세요.`;
+    return `❌ 일정 조회 중 오류 발생: ${events.error}`;
   }
-
+  
   if (events.length === 0) {
     return `📅 ${dateLabel} 예정된 일정이 없습니다.`;
   }
-
-  const eventSummary = events
-    .map((evt, idx) => {
-      const lines = [
-        `${idx + 1}. 📌 ${evt.title}`,
-        `   🕐 시간: ${evt.startDate}`,
-      ];
-
-      if (evt.location && evt.location !== '미정' && evt.location !== '') {
-        lines.push(`   📍 장소: ${evt.location}`);
-      }
-
-      if (evt.calendar) {
-        lines.push(`   📂 캘린더: ${evt.calendar}`);
-      }
-
-      return lines.join('\n');
-    })
-    .join('\n\n');
-
+  
+  const eventSummary = events.map((evt, idx) => {
+    const lines = [
+      `${idx + 1}. 📌 ${evt.title}`,
+      `   🕐 시간: ${evt.startDate}`,
+    ];
+    
+    if (evt.location && evt.location !== '미정') {
+      lines.push(`   📍 장소: ${evt.location}`);
+    }
+    
+    lines.push(`   📂 캘린더: ${evt.calendar}`);
+    
+    return lines.join('\n');
+  }).join('\n\n');
+  
   return `📅 ${dateLabel} 일정 (총 ${events.length}개):\n\n${eventSummary}`;
 }
 
@@ -170,8 +133,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'check_tomorrow_events',
-      description:
-        '내일 예정된 캘린더 일정을 모두 확인합니다. iCloud 캘린더와 동기화된 모든 일정을 조회합니다.',
+      description: '내일 예정된 캘린더 일정을 모두 확인합니다. iCloud 캘린더와 동기화된 모든 일정을 조회합니다.',
       inputSchema: {
         type: 'object',
         properties: {},
@@ -179,8 +141,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'check_today_events',
-      description:
-        '오늘 예정된 캘린더 일정을 모두 확인합니다. 현재 진행 중이거나 예정된 일정을 조회합니다.',
+      description: '오늘 예정된 캘린더 일정을 모두 확인합니다. 현재 진행 중이거나 예정된 일정을 조회합니다.',
       inputSchema: {
         type: 'object',
         properties: {},
@@ -188,19 +149,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'check_events_by_offset',
-      description:
-        '특정 날짜의 일정을 확인합니다. offset을 사용하여 원하는 날짜의 일정을 조회할 수 있습니다.',
+      description: '특정 날짜의 일정을 확인합니다. offset을 사용하여 원하는 날짜의 일정을 조회할 수 있습니다.',
       inputSchema: {
         type: 'object',
         properties: {
           daysOffset: {
             type: 'number',
-            description:
-              '오늘 기준 일 수 (0: 오늘, 1: 내일, 2: 모레, -1: 어제)',
-            default: 1,
-          },
+            description: '오늘 기준 일 수 (0: 오늘, 1: 내일, 2: 모레, -1: 어제)',
+            default: 1
+          }
         },
-        required: ['daysOffset'],
+        required: ['daysOffset']
       },
     },
   ],
@@ -209,12 +168,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 // 도구 실행 핸들러
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-
+  
   switch (name) {
     case 'check_tomorrow_events': {
       const events = getEvents(1);
       const formattedText = formatEvents(events, '내일');
-
+      
       return {
         content: [
           {
@@ -224,11 +183,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ],
       };
     }
-
+    
     case 'check_today_events': {
       const events = getEvents(0);
       const formattedText = formatEvents(events, '오늘');
-
+      
       return {
         content: [
           {
@@ -238,11 +197,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ],
       };
     }
-
+    
     case 'check_events_by_offset': {
       const offset = args.daysOffset || 1;
       const events = getEvents(offset);
-
+      
       let dateLabel = '해당 날짜';
       if (offset === 0) dateLabel = '오늘';
       else if (offset === 1) dateLabel = '내일';
@@ -250,9 +209,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       else if (offset === -1) dateLabel = '어제';
       else if (offset > 0) dateLabel = `${offset}일 후`;
       else dateLabel = `${Math.abs(offset)}일 전`;
-
+      
       const formattedText = formatEvents(events, dateLabel);
-
+      
       return {
         content: [
           {
@@ -262,7 +221,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ],
       };
     }
-
+    
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -272,7 +231,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('Calendar Agent MCP server running on stdio (v1.0.1 - Fixed)');
+  console.error('Calendar Agent MCP server running on stdio');
 }
 
 main().catch((error) => {
